@@ -20,7 +20,7 @@ export type APIResponseBody<T> = {
   result: number;
   data: T | null;
   messages: string[];
-  error: Error[];
+  error: any;
 };
 
 export default async function handler(
@@ -42,17 +42,15 @@ export default async function handler(
   }
 
   if (service === 'searchTwitter') {
-    const {
-      bearerToken,
-      term,
-      userTerms,
-    } = data;
+    const { bearerToken, term, userTerms } = data;
 
-    if (missingParams({
-      bearerToken,
-      term,
-      userTerms,
-    }).length) {
+    if (
+      missingParams({
+        bearerToken,
+        term,
+        userTerms,
+      }).length
+    ) {
       return res.status(400).json({
         result: 0,
         data: null,
@@ -72,7 +70,7 @@ export default async function handler(
       const response = await searchTwitter(data);
 
       return res.status(200).json({
-        result: 1,
+        result: response?.length || 0,
         data: response,
         messages: [],
         error: [],
@@ -82,7 +80,7 @@ export default async function handler(
         result: 0,
         data: null,
         messages: [error.message],
-        error: [error],
+        error: JSON.stringify(error, Object.getOwnPropertyNames(error)),
       });
     }
   }
@@ -111,7 +109,14 @@ async function searchTwitter({
   const twitterClient = twitter_client(cleanBearerToken);
 
   if (!twitterClient) throw new Error('Unable to initiate twitter client');
-  let results: { tweet: Tweet; users: User[]; link: string }[] = [];
+  let results: {
+    tweet: Tweet;
+    users: (User | undefined)[];
+    link: string;
+    mentioned: (User | undefined)[];
+    liked: (User | undefined)[];
+    retweeted: (User | undefined)[];
+  }[] = [];
   const cleanTerm = term.trim().replace(/\#/gm, '');
   const cleanUserTerms = userTerms
     .split(',')
@@ -120,45 +125,45 @@ async function searchTwitter({
   const tweets = await twitterClient.search_tweets(cleanTerm);
 
   for (const tweet of tweets.data) {
-    const usernames_mentioned_in_tweet: string[] = tweets.data
+    const usernames_mentioned_in_tweet: string[] = [tweet]
       .filter((tweet) => USERNAME_REG.test(tweet.text))
       .flatMap((tweet) => extract_users(tweet.text))
       .map((user) => clean_name(user || ''));
 
-    const liked_promises = twitterClient.get_liked(tweet.id);
-    const retweeted_by_promises = twitterClient.get_retweeted(tweet.id);
+    const likedResponse = await twitterClient.get_liked(tweet.id);
+    const retweetedResponse = await twitterClient.get_retweeted(tweet.id);
 
-    const responses = await Promise.all([
-      liked_promises,
-      retweeted_by_promises,
-    ]);
+    const liked = likedResponse.data
+      ? likedResponse.data.map((data) => data.username)
+      : [];
+    const retweeted = retweetedResponse.data
+      ? retweetedResponse?.data.map((data) => data.username)
+      : [];
 
-    const related_usernames = responses
-      .filter((response) => response.data)
-      .flatMap((response) => response.data.map((data) => data.username));
-
-    const all_users = await twitterClient.lookup_users([
-      ...related_usernames,
-      ...usernames_mentioned_in_tweet,
-    ]);
-
-    const users_that = all_users.data.filter((user) => {
-      return cleanUserTerms
-        .map((term) => user.description.includes(term))
-        .some(Boolean);
-    });
+    const user_details = await twitterClient.lookup_users(
+      _.uniq([...liked, ...retweeted, ...usernames_mentioned_in_tweet])
+    );
 
     results = [
       ...results,
       {
         tweet,
-        users: _.uniqBy(users_that, 'username'),
+        users: user_details.data.filter(usersWhoMatchTerms(cleanUserTerms)),
         link: `https://twitter.com/twitter/status/${tweet.id}`,
+        mentioned: usernames_mentioned_in_tweet
+          .map(userNameToUserDetails(user_details.data))
+          .filter(usersWhoMatchTerms(cleanUserTerms)),
+        liked: liked
+          .map(userNameToUserDetails(user_details.data))
+          .filter(usersWhoMatchTerms(cleanUserTerms)),
+        retweeted: retweeted
+          .map(userNameToUserDetails(user_details.data))
+          .filter(usersWhoMatchTerms(cleanUserTerms)),
       },
     ];
   }
 
-  return results
+  return results;
 }
 
 function missingParams(params: { [key: string]: any }): string[] {
@@ -166,3 +171,18 @@ function missingParams(params: { [key: string]: any }): string[] {
     .filter((param) => !param[1])
     .flatMap((param) => param[0]);
 }
+
+const usersWhoMatchTerms = (terms: string[]) => (user: User | undefined) => {
+  if (!user) return false;
+
+  return terms
+    .map((term: string) => {
+      const reg = new RegExp(term, 'gmi');
+      return reg.test(user.description);
+    })
+    .some(Boolean);
+};
+
+const userNameToUserDetails = (users: User[]) => (username: string) => {
+  return _.find(users, ['username', username]);
+};

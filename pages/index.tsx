@@ -91,7 +91,7 @@ const Home: NextPage = () => {
 
         <Box mt={20} mb={20}>
           <FormControl pb={10}>
-            <FormLabel htmlFor="term">Twiiter API Bearer token</FormLabel>
+            <FormLabel htmlFor="term">Twitter API Bearer token</FormLabel>
             <Input
               id="token"
               type="token"
